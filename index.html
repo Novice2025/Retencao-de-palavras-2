@@ -47,9 +47,18 @@
         let currentVocabulary = []; 
         let currentContextId = null; // ID of the word whose context is currently displayed
 
-        // --- GLOBAL ENVIRONMENT VARIABLES ---
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // --- GLOBAL ENVIRONMENT VARIABLES (CONFIGURAÇÃO PERMANENTE DO FIREBASE) ---
+        // ESTES VALORES FORAM INSERIDOS DIRETAMENTE DE SEU CONSOLE FIREBASE
+        const appId = "srs-vocabulario"; // Usando o projectId
+        const firebaseConfig = {
+            apiKey: "AIzaSyAirkDd3A1_2iPE_0h_ud9MlfL0O8TAnQU",
+            authDomain: "srs-vocabulario.firebaseapp.com",
+            projectId: "srs-vocabulario",
+            storageBucket: "srs-vocabulario.firebasestorage.app",
+            messagingSenderId: "862583334765",
+            appId: "1:862583334765:web:9afae6821f6ce1094e9c64",
+            // measurementId: "G-9850DPVEJH" // Omitido por não ser necessário para Firestore/Auth
+        };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         // --- END GLOBAL ENVIRONMENT VARIABLES ---
 
@@ -63,18 +72,25 @@
         // --- FIREBASE INITIALIZATION AND AUTHENTICATION ---
         async function setupFirebase() {
             try {
-                if (Object.keys(firebaseConfig).length === 0) {
-                    throw new Error("Firebase configuration is missing.");
-                }
-
+                // A verificação de configuração ausente foi removida, pois agora é estática.
+                
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
                 // Handle authentication
                 if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
+                    try {
+                        // Tenta usar o token customizado do Canvas (se presente)
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } catch (e) {
+                        // FIX: Em caso de falha (como custom-token-mismatch),
+                        // faz o fallback para o login anônimo, que o usuário habilitou.
+                        console.warn("Custom token sign-in failed, falling back to anonymous login.", e);
+                        await signInAnonymously(auth);
+                    }
                 } else {
+                    // Se não houver token customizado, usa o login anônimo.
                     await signInAnonymously(auth);
                 }
 
