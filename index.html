@@ -193,6 +193,45 @@
             }
         }
 
+        // --- EXPORT FUNCTIONALITY ---
+
+        function exportToCSV() {
+            if (currentVocabulary.length === 0) {
+                showNotification("No words to export.", 'error');
+                return;
+            }
+
+            // Define CSV headers (matching relevant data fields)
+            const headers = ['Palavra', 'Contexto', 'Proxima Revisao', 'Nivel'];
+
+            // Map vocabulary data to CSV rows
+            const csvRows = currentVocabulary.map(item => [
+                `"${item.word.replace(/"/g, '""')}"`, // Handle quotes
+                `"${item.context.replace(/"/g, '""')}"`, // Handle quotes
+                item.nextReviewDate,
+                item.level
+            ].join(';')); // Use semicolon as separator for better compatibility with non-US systems
+
+            // Combine headers and rows
+            const csvContent = [headers.join(';'), ...csvRows].join('\n');
+
+            // Create a Blob and download link
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            
+            // Set the download attributes
+            link.href = URL.createObjectURL(blob);
+            link.download = `srs_vocabulary_export_${new Date().toISOString().split('T')[0]}.csv`;
+
+            // Append link to body, click it, and remove it
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            showNotification(`Exported ${currentVocabulary.length} words to CSV.`, 'info');
+        }
+
+
         // --- REAL-TIME DATA LISTENER & RENDERING ---
 
         function listenToVocabulary() {
@@ -325,6 +364,7 @@
         window.challengeHandler = challengeMemory;
         window.deleteHandler = deleteVocabularyItem;
         window.toggleContextHandler = toggleContext;
+        window.exportHandler = exportToCSV;
 
 
         // Start the application setup
@@ -388,8 +428,9 @@
             <div class="p-6 bg-gray-800 rounded-2xl shadow-xl">
                 <div class="flex flex-col sm:flex-row justify-between items-center mb-4">
                     <p id="total-entries" class="text-sm text-gray-400 mb-2 sm:mb-0">Seu vocabulário, classificado por urgência de revisão.</p>
-                    <button class="px-4 py-2 bg-gray-600 text-white rounded-lg shadow-md hover:bg-gray-500 transition duration-150">
-                        Exportar para CSV (Not yet implemented)
+                    <button onclick="window.exportHandler()"
+                            class="px-4 py-2 bg-gray-600 text-white rounded-lg shadow-md hover:bg-gray-500 transition duration-150">
+                        Exportar para CSV
                     </button>
                 </div>
 
