@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spaced Repetition Vocabulary Tracker</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for a cleaner look */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937; /* Dark background */
+        }
+        .loading-ring {
+            border: 4px solid rgba(255, 255, 255, 0.2);
+            border-top: 4px solid #34d399; /* Tailwind emerald-400 */
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .table-header {
+            background-color: #10b981; /* Tailwind emerald-500 */
+            color: white;
+            padding: 0.75rem;
+            text-align: left;
+            font-weight: bold;
+        }
+    </style>
+    <!-- Load Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables
+        let app, db, auth, userId;
+        let isAuthReady = false;
+        let unsubscribeVocabularyListener;
+
+        // Global data store and context display state
+        let currentVocabulary = []; 
+        let currentContextId = null; // ID of the word whose context is currently displayed
+
+        // --- GLOBAL ENVIRONMENT VARIABLES ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // --- END GLOBAL ENVIRONMENT VARIABLES ---
+
+        setLogLevel('Debug'); // Enable Firebase debug logging
+
+        // --- SRS CONSTANTS ---
+        // Days to wait for next review based on level (simplified Fading Interval Schedule)
+        const INTERVALS_DAYS = [1, 3, 7, 14, 30, 90, 180, 365]; 
+        const MAX_LEVEL = INTERVALS_DAYS.length;
+
+        // --- FIREBASE INITIALIZATION AND AUTHENTICATION ---
+        async function setupFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    throw new Error("Firebase configuration is missing.");
+                }
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Handle authentication
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        isAuthReady = true;
+                        // Start listening to the personal vocabulary collection
+                        listenToVocabulary();
+                    } else {
+                        // Fallback, but Firestore will likely fail based on security rules
+                        userId = crypto.randomUUID();
+                        document.getElementById('user-id-display').textContent = `User ID (Fallback): ${userId} - Sign-in failed.`;
+                    }
+                    
+                    document.getElementById('loading-state').classList.add('hidden');
+                    document.getElementById('main-content').classList.remove('hidden');
+                });
+
+            } catch (error) {
+                console.error("Firebase setup failed:", error);
+                document.getElementById('loading-state').innerHTML = `
+                    <p class="text-red-400">Error setting up Firebase: ${error.message}. Check console for details.</p>
+                `;
+            }
+        }
+
+        // --- FIRESTORE UTILITIES ---
+        // Private collection path: /artifacts/{appId}/users/{userId}/vocabulary
+        function getVocabularyCollectionRef() {
+            if (!db || !userId) throw new Error("Firestore or User ID not ready.");
+            return collection(db, `artifacts/${appId}/users/${userId}/vocabulary`);
+        }
+
+        // Utility to calculate the next review date based on the new level
+        function getNextReviewDate(level) {
+            const days = INTERVALS_DAYS[level - 1] || INTERVALS_DAYS[MAX_LEVEL - 1];
+            const date = new Date();
+            date.setDate(date.getDate() + days);
+            // This function provides the client-side date for display
+            return date; 
+        }
+
+        // --- CRUD OPERATIONS ---
+
+        async function addVocabularyItem(word, context) {
+            if (!isAuthReady || !word.trim() || !context.trim()) {
+                showNotification("Please enter both a word and context.", 'error');
+                return;
+            }
+
+            const cleanWord = word.trim();
+            const cleanContext = context.trim();
+            const initialLevel = 1;
+            const nextReview = getNextReviewDate(initialLevel); // Get the initial date
+
+            const newItem = {
+                word: cleanWord,
+                context: cleanContext,
+                // Store next review date as a string for display and sorting (YYYY-MM-DD)
+                nextReviewDate: nextReview.toISOString().split('T')[0], 
+                level: initialLevel,
+                createdAt: serverTimestamp(),
+            };
+
+            try {
+                // setDoc uses the word itself as the document ID for easy reference/uniqueness
+                await setDoc(doc(getVocabularyCollectionRef(), cleanWord.toLowerCase()), newItem);
+                document.getElementById('word-input').value = '';
+                document.getElementById('context-input').value = ''; 
+                showNotification(`'${cleanWord}' added! Starting spaced repetition.`, 'info');
+            } catch (error) {
+                console.error("Error adding document: ", error);
+                showNotification("Failed to add vocabulary item.", 'error');
+            }
+        }
+
+        async function challengeMemory(wordId, currentLevel) {
+            if (!isAuthReady) return;
+
+            // Increment the level, capping it at MAX_LEVEL
+            const newLevel = Math.min(currentLevel + 1, MAX_LEVEL);
+            const nextReview = getNextReviewDate(newLevel);
+
+            try {
+                const itemRef = doc(db, getVocabularyCollectionRef().path, wordId);
+                await setDoc(itemRef, {
+                    level: newLevel,
+                    nextReviewDate: nextReview.toISOString().split('T')[0],
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+                showNotification(`Progress updated for '${wordId}'. Next review in ${INTERVALS_DAYS[newLevel-1]} days.`, 'info');
+                
+                // If the context was visible, hide it after successful challenge
+                if (currentContextId === wordId) {
+                    currentContextId = null;
+                }
+
+            } catch (error) {
+                console.error("Error updating document: ", error);
+                showNotification("Failed to update memory challenge.", 'error');
+            }
+        }
+
+        async function deleteVocabularyItem(wordId) {
+            if (!isAuthReady) return;
+
+            try {
+                const itemRef = doc(db, getVocabularyCollectionRef().path, wordId);
+                await deleteDoc(itemRef);
+                showNotification(`'${wordId}' deleted.`, 'error');
+            } catch (error) {
+                console.error("Error deleting document: ", error);
+                showNotification("Failed to delete vocabulary item.", 'error');
+            }
+        }
+
+        // --- REAL-TIME DATA LISTENER & RENDERING ---
+
+        function listenToVocabulary() {
+            if (unsubscribeVocabularyListener) {
+                unsubscribeVocabularyListener(); // Stop previous listener if it exists
+            }
+
+            const vocabQuery = query(getVocabularyCollectionRef()); 
+
+            unsubscribeVocabularyListener = onSnapshot(vocabQuery, (querySnapshot) => {
+                const vocabulary = [];
+                querySnapshot.forEach((doc) => {
+                    vocabulary.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Store current data globally before rendering
+                currentVocabulary = vocabulary;
+
+                // Sort vocabulary: prioritize items that need review (past or today) first, then by level (lower level first)
+                currentVocabulary.sort((a, b) => {
+                    const today = new Date().toISOString().split('T')[0];
+                    const aDue = a.nextReviewDate <= today;
+                    const bDue = b.nextReviewDate <= today;
+
+                    if (aDue !== bDue) {
+                        return aDue ? -1 : 1; // Due comes first
+                    }
+                    return a.level - b.level; // Lower level comes first
+                });
+
+                renderVocabulary(currentVocabulary);
+            }, (error) => {
+                console.error("Error listening to vocabulary:", error);
+                showNotification("Failed to load real-time vocabulary list.", 'error');
+            });
+        }
+        
+        function toggleContext(wordId) {
+            // If the same word is clicked, hide it. Otherwise, show it.
+            currentContextId = (currentContextId === wordId) ? null : wordId;
+            renderVocabulary(currentVocabulary); // Re-render to apply the change
+        }
+
+
+        function renderVocabulary(vocabulary) {
+            const tableBody = document.getElementById('vocab-table-body');
+            if (!tableBody) return;
+
+            tableBody.innerHTML = ''; // Clear the current list
+            document.getElementById('total-entries').textContent = `Total: ${vocabulary.length} palavras.`;
+
+
+            if (vocabulary.length === 0) {
+                tableBody.innerHTML = `
+                    <tr><td colspan="5" class="p-6 text-center text-gray-500 bg-gray-700 rounded-b-xl">No words added yet. Use the form above to begin.</td></tr>
+                `;
+                return;
+            }
+
+            vocabulary.forEach(item => {
+                const isDue = new Date(item.nextReviewDate) <= new Date();
+                const rowClass = isDue ? 'bg-red-900/50 hover:bg-red-900/70' : 'bg-gray-700 hover:bg-gray-600';
+
+                // 1. Create the main vocabulary row
+                const row = document.createElement('tr');
+                row.className = `border-b border-gray-600 ${rowClass} transition duration-150`;
+                row.innerHTML = `
+                    <td class="p-3 text-white font-medium">${item.word}</td>
+                    <td class="p-3 ${isDue ? 'text-red-400 font-bold' : 'text-gray-300'}">${item.nextReviewDate}</td>
+                    <td class="p-3 text-center text-yellow-400">Nível ${item.level}</td>
+                    <td class="p-3 space-y-2">
+                        <button onclick="window.challengeHandler('${item.id}', ${item.level})"
+                                class="w-full px-3 py-1 text-sm bg-emerald-500 text-white rounded-lg shadow-md hover:bg-emerald-600 transition duration-150">
+                            Desafiar Memória
+                        </button>
+                        <button onclick="window.toggleContextHandler('${item.id}')"
+                                class="w-full px-3 py-1 text-sm bg-gray-500 text-white rounded-lg shadow-md hover:bg-gray-600 transition duration-150">
+                            ${currentContextId === item.id ? 'Esconder Contexto' : 'Mostrar Contexto'}
+                        </button>
+                    </td>
+                    <td class="p-3 text-center">
+                        <button onclick="window.deleteHandler('${item.id}')"
+                                class="text-red-400 hover:text-red-500 p-1 rounded-full hover:bg-gray-600 transition duration-150">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </td>
+                `;
+                tableBody.appendChild(row);
+                
+                // 2. Conditionally add the context detail row
+                if (item.id === currentContextId) {
+                    const contextRow = document.createElement('tr');
+                    contextRow.className = 'bg-gray-900 border-b border-gray-600';
+                    contextRow.innerHTML = `
+                        <td colspan="5" class="p-4">
+                            <p class="text-xs font-bold text-gray-400 mb-1 uppercase">Contexto / Frase de Exemplo:</p>
+                            <p class="text-base text-gray-300 italic p-2 border-l-4 border-emerald-400 pl-3">${item.context}</p>
+                        </td>
+                    `;
+                    tableBody.appendChild(contextRow);
+                }
+            });
+        }
+
+
+        // --- MODAL AND NOTIFICATION HANDLING ---
+
+        function showNotification(message, type = 'info') {
+            const notification = document.getElementById('notification-message');
+            const container = document.getElementById('notification-container');
+            if (!notification || !container) return;
+
+            notification.textContent = message;
+            container.className = `fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform transform ${type === 'error' ? 'bg-red-500' : 'bg-green-500'}`;
+            container.classList.remove('translate-x-full');
+            container.classList.add('translate-x-0');
+
+            setTimeout(() => {
+                container.classList.add('translate-x-full');
+                container.classList.remove('translate-x-0');
+            }, 3000);
+        }
+
+        // --- EXPOSE FUNCTIONS TO WINDOW SCOPE ---
+        window.addHandler = () => {
+            const wordInput = document.getElementById('word-input');
+            const contextInput = document.getElementById('context-input');
+            addVocabularyItem(wordInput.value, contextInput.value);
+        };
+        window.challengeHandler = challengeMemory;
+        window.deleteHandler = deleteVocabularyItem;
+        window.toggleContextHandler = toggleContext;
+
+
+        // Start the application setup
+        window.onload = setupFirebase;
+
+    </script>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+
+    <!-- Notification Area -->
+    <div id="notification-container" class="fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform transform translate-x-full duration-300">
+        <span id="notification-message"></span>
+    </div>
+
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-emerald-400 mb-2">
+                Plano Mestre de Retenção (SRS)
+            </h1>
+            <p id="user-id-display" class="text-sm text-gray-400 truncate break-all">
+                Loading User ID...
+            </p>
+            <p class="text-sm text-red-400 mt-2">
+                This version uses your **Personal Firestore** storage for persistent saving.
+            </p>
+        </header>
+
+        <!-- Loading State -->
+        <div id="loading-state" class="flex flex-col items-center justify-center p-10 bg-gray-800 rounded-xl shadow-2xl text-white">
+            <div class="loading-ring mb-4"></div>
+            <p>Initializing application and signing in...</p>
+        </div>
+
+        <!-- Main Content (Hidden until Firebase is ready) -->
+        <main id="main-content" class="hidden">
+            
+            <!-- 1. Adicionar Vocabulário com Contexto -->
+            <h2 class="text-2xl font-semibold text-white mb-4">1. Adicionar Vocabulário com Contexto</h2>
+            <div class="p-6 bg-gray-800 rounded-2xl shadow-xl mb-8">
+                <div class="mb-4">
+                    <label for="word-input" class="block text-sm font-medium text-gray-300 mb-1">Palavra/Frase</label>
+                    <input type="text" id="word-input" placeholder="Ex: 'Ephemeral' ou 'To call it a day'" 
+                           class="w-full p-3 rounded-lg border-2 border-gray-600 bg-gray-700 text-white placeholder-gray-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 transition duration-150 ease-in-out">
+                </div>
+                
+                <div class="mb-6">
+                    <label for="context-input" class="block text-sm font-medium text-gray-300 mb-1">Contexto / Frase de Exemplo</label>
+                    <input type="text" id="context-input" placeholder="Ex: 'The beauty of the cherry blossoms is ephemeral.'" 
+                           class="w-full p-3 rounded-lg border-2 border-gray-600 bg-gray-700 text-white placeholder-gray-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 transition duration-150 ease-in-out">
+                </div>
+
+                <button onclick="window.addHandler()"
+                        class="w-full px-6 py-3 bg-emerald-500 text-white font-semibold rounded-lg shadow-md hover:bg-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 focus:ring-offset-gray-800 transition duration-150 ease-in-out">
+                    Adicionar Palavra (Início da Repetição Espaçada)
+                </button>
+            </div>
+
+
+            <!-- 2. Monitoramento de Retenção (Spaced Repetition) -->
+            <h2 class="text-2xl font-semibold text-white mb-4">2. Monitoramento de Retenção</h2>
+            <div class="p-6 bg-gray-800 rounded-2xl shadow-xl">
+                <div class="flex flex-col sm:flex-row justify-between items-center mb-4">
+                    <p id="total-entries" class="text-sm text-gray-400 mb-2 sm:mb-0">Seu vocabulário, classificado por urgência de revisão.</p>
+                    <button class="px-4 py-2 bg-gray-600 text-white rounded-lg shadow-md hover:bg-gray-500 transition duration-150">
+                        Exportar para CSV (Not yet implemented)
+                    </button>
+                </div>
+
+                <div class="overflow-x-auto rounded-lg shadow-lg">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr>
+                                <th class="table-header w-2/5">Palavra</th>
+                                <th class="table-header w-1/5">Próxima Revisão</th>
+                                <th class="table-header w-1/12 text-center">Nível</th>
+                                <th class="table-header w-1/4">Desafio (Recall)</th>
+                                <th class="table-header w-1/12 text-center">Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vocab-table-body" class="divide-y divide-gray-600 text-gray-200">
+                            <tr><td colspan="5" class="p-6 text-center text-gray-500 bg-gray-700">Loading vocabulary...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+        </main>
+    </div>
+
+</body>
+</html>
