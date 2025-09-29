@@ -10,11 +10,11 @@
         /* Custom styles for a cleaner look */
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #1f2937; /* Dark background */
+            background-color: #0f172a; /* Deep dark background (slate-900) */
         }
         .loading-ring {
             border: 4px solid rgba(255, 255, 255, 0.2);
-            border-top: 4px solid #34d399; /* Tailwind emerald-400 */
+            border-top: 4px solid #06b6d4; /* Tailwind cyan-500 */
             border-radius: 50%;
             width: 30px;
             height: 30px;
@@ -25,31 +25,57 @@
             100% { transform: rotate(360deg); }
         }
         .table-header {
-            background-color: #10b981; /* Tailwind emerald-500 */
-            color: white;
+            background-color: #1e293b; /* slate-800 */
+            color: #94a3b8; /* slate-400 */
             padding: 0.75rem;
             text-align: left;
             font-weight: bold;
+            border-bottom: 2px solid #06b6d4; /* cyan-500 separator */
+        }
+        /* Custom styles for the flashcard */
+        .flashcard {
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s ease-in-out;
+        }
+        .flashcard-back {
+            background-color: #334155; /* slate-700 */
+            min-height: 150px;
+            padding: 1rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
         }
     </style>
     <!-- Load Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global Firebase variables
         let app, db, auth, userId;
         let isAuthReady = false;
         let unsubscribeVocabularyListener;
+        let userName = "User"; 
 
         // Global data store and context display state
         let currentVocabulary = []; 
-        let currentContextId = null; // ID of the word whose context is currently displayed
+        let currentContextId = null; 
+        let currentCategoryFilter = 'All'; 
+        let currentLevelFilter = 'All'; 
 
-        // --- GLOBAL ENVIRONMENT VARIABLES (CONFIGURAÇÃO PERMANENTE DO FIREBASE) ---
-        // ESTES VALORES FORAM INSERIDOS DIRETAMENTE DE SEU CONSOLE FIREBASE
-        const appId = "srs-vocabulario"; // Usando o projectId
+        // --- GAME MODE STATE ---
+        let challengeQueue = []; 
+        let currentCardIndex = -1; 
+        let isCardFlipped = false; 
+
+
+        // --- GLOBAL ENVIRONMENT VARIABLES (FIREBASE CONFIGURATION) ---
+        // THESE VALUES ARE FROM YOUR FIREBASE CONSOLE
+        const appId = "srs-vocabulario"; 
         const firebaseConfig = {
             apiKey: "AIzaSyAirkDd3A1_2iPE_0h_ud9MlfL0O8TAnQU",
             authDomain: "srs-vocabulario.firebaseapp.com",
@@ -57,7 +83,7 @@
             storageBucket: "srs-vocabulario.firebasestorage.app",
             messagingSenderId: "862583334765",
             appId: "1:862583334765:web:9afae6821f6ce1094e9c64",
-            // measurementId: "G-9850DPVEJH" // Omitido por não ser necessário para Firestore/Auth
+            // measurementId: "G-9850DPVEJH" // Omitted as not needed for Firestore/Auth
         };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         // --- END GLOBAL ENVIRONMENT VARIABLES ---
@@ -72,7 +98,6 @@
         // --- FIREBASE INITIALIZATION AND AUTHENTICATION ---
         async function setupFirebase() {
             try {
-                // A verificação de configuração ausente foi removida, pois agora é estática.
                 
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
@@ -81,30 +106,31 @@
                 // Handle authentication
                 if (initialAuthToken) {
                     try {
-                        // Tenta usar o token customizado do Canvas (se presente)
+                        // Tries to use the Canvas custom token (if present)
                         await signInWithCustomToken(auth, initialAuthToken);
                     } catch (e) {
-                        // FIX: Em caso de falha (como custom-token-mismatch),
-                        // faz o fallback para o login anônimo, que o usuário habilitou.
+                        // FIX: Fallback to anonymous login if custom token fails
                         console.warn("Custom token sign-in failed, falling back to anonymous login.", e);
                         await signInAnonymously(auth);
                     }
                 } else {
-                    // Se não houver token customizado, usa o login anônimo.
+                    // Uses anonymous login if no custom token is available
                     await signInAnonymously(auth);
                 }
 
-                onAuthStateChanged(auth, (user) => {
+                onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
-                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
                         isAuthReady = true;
+                        
+                        await loadUserName(userId); // Load name before showing content
+
                         // Start listening to the personal vocabulary collection
                         listenToVocabulary();
                     } else {
-                        // Fallback, but Firestore will likely fail based on security rules
+                        // Fallback (though Firestore security rules might prevent access)
                         userId = crypto.randomUUID();
-                        document.getElementById('user-id-display').textContent = `User ID (Fallback): ${userId} - Sign-in failed.`;
+                        document.getElementById('welcome-message').textContent = `Welcome, ${userName}!`;
                     }
                     
                     document.getElementById('loading-state').classList.add('hidden');
@@ -120,37 +146,80 @@
         }
 
         // --- FIRESTORE UTILITIES ---
-        // Private collection path: /artifacts/{appId}/users/{userId}/vocabulary
         function getVocabularyCollectionRef() {
             if (!db || !userId) throw new Error("Firestore or User ID not ready.");
             return collection(db, `artifacts/${appId}/users/${userId}/vocabulary`);
         }
+        
+        function getUserProfileRef(uid) {
+            if (!db || !uid) throw new Error("Firestore or User ID not ready.");
+            return doc(db, `artifacts/${appId}/users/${uid}/profile/details`);
+        }
+
+        async function loadUserName(uid) {
+            try {
+                const docSnap = await getDoc(getUserProfileRef(uid));
+                if (docSnap.exists() && docSnap.data().name) {
+                    userName = docSnap.data().name;
+                } else {
+                    userName = "User";
+                }
+                document.getElementById('welcome-message').textContent = `Welcome, ${userName}!`;
+                document.getElementById('name-input').value = userName === "User" ? "" : userName;
+
+            } catch (error) {
+                console.error("Error loading user name:", error);
+                userName = "User (Error)";
+            }
+        }
+        
+        async function saveUserName(name) {
+            if (!isAuthReady || !name.trim()) {
+                showNotification("Please enter a valid name.", 'error');
+                return;
+            }
+            const cleanName = name.trim();
+            try {
+                await setDoc(getUserProfileRef(userId), { name: cleanName }, { merge: true });
+                userName = cleanName;
+                document.getElementById('welcome-message').textContent = `Welcome, ${cleanName}!`;
+                showNotification(`Name saved as '${cleanName}'.`, 'info');
+            } catch (error) {
+                console.error("Error saving user name:", error);
+                showNotification("Failed to save name.", 'error');
+            }
+        }
 
         // Utility to calculate the next review date based on the new level
         function getNextReviewDate(level) {
+            // Level is 1-indexed (Level 1 corresponds to INTERVALS_DAYS[0])
             const days = INTERVALS_DAYS[level - 1] || INTERVALS_DAYS[MAX_LEVEL - 1];
             const date = new Date();
             date.setDate(date.getDate() + days);
-            // This function provides the client-side date for display
             return date; 
         }
 
         // --- CRUD OPERATIONS ---
 
-        async function addVocabularyItem(word, context) {
-            if (!isAuthReady || !word.trim() || !context.trim()) {
-                showNotification("Please enter both a word and context.", 'error');
+        async function addVocabularyItem(word, context, category, type) {
+            // Note: category is now mandatory (General/Business)
+            if (!isAuthReady || !word.trim() || !context.trim() || !category.trim()) {
+                showNotification("Please enter the word, context, and select a category.", 'error');
                 return;
             }
 
             const cleanWord = word.trim();
             const cleanContext = context.trim();
+            const cleanCategory = category.trim(); 
+            const cleanType = type.trim(); 
             const initialLevel = 1;
-            const nextReview = getNextReviewDate(initialLevel); // Get the initial date
+            const nextReview = getNextReviewDate(initialLevel); 
 
             const newItem = {
                 word: cleanWord,
                 context: cleanContext,
+                category: cleanCategory, 
+                type: cleanType,
                 // Store next review date as a string for display and sorting (YYYY-MM-DD)
                 nextReviewDate: nextReview.toISOString().split('T')[0], 
                 level: initialLevel,
@@ -158,10 +227,12 @@
             };
 
             try {
-                // setDoc uses the word itself as the document ID for easy reference/uniqueness
+                // Use the word as the document ID for uniqueness and easy lookup
                 await setDoc(doc(getVocabularyCollectionRef(), cleanWord.toLowerCase()), newItem);
                 document.getElementById('word-input').value = '';
                 document.getElementById('context-input').value = ''; 
+                document.getElementById('category-input').value = 'General'; // Reset category dropdown
+                document.getElementById('type-input').value = 'Word'; // Reset type dropdown
                 showNotification(`'${cleanWord}' added! Starting spaced repetition.`, 'info');
             } catch (error) {
                 console.error("Error adding document: ", error);
@@ -169,10 +240,11 @@
             }
         }
 
+        // Function for quick level up from the table view
         async function challengeMemory(wordId, currentLevel) {
             if (!isAuthReady) return;
 
-            // Increment the level, capping it at MAX_LEVEL
+            // When challenging from the table, we assume a correct recall and advance one level.
             const newLevel = Math.min(currentLevel + 1, MAX_LEVEL);
             const nextReview = getNextReviewDate(newLevel);
 
@@ -183,7 +255,7 @@
                     nextReviewDate: nextReview.toISOString().split('T')[0],
                     updatedAt: serverTimestamp(),
                 }, { merge: true });
-                showNotification(`Progress updated for '${wordId}'. Next review in ${INTERVALS_DAYS[newLevel-1]} days.`, 'info');
+                showNotification(`Quick progress update for '${wordId}'. New level: ${newLevel}.`, 'info');
                 
                 // If the context was visible, hide it after successful challenge
                 if (currentContextId === wordId) {
@@ -209,41 +281,30 @@
             }
         }
 
-        // --- EXPORT FUNCTIONALITY ---
-
+        // --- EXPORT FUNCTIONALITY (REMAINS THE SAME) ---
         function exportToCSV() {
             if (currentVocabulary.length === 0) {
                 showNotification("No words to export.", 'error');
                 return;
             }
-
-            // Define CSV headers (matching relevant data fields)
-            const headers = ['Palavra', 'Contexto', 'Proxima Revisao', 'Nivel'];
-
-            // Map vocabulary data to CSV rows
+            // Added 'Type' to headers
+            const headers = ['Word', 'Type', 'Category', 'Context', 'Next Review', 'Level']; 
             const csvRows = currentVocabulary.map(item => [
-                `"${item.word.replace(/"/g, '""')}"`, // Handle quotes
-                `"${item.context.replace(/"/g, '""')}"`, // Handle quotes
+                `"${item.word.replace(/"/g, '""')}"`, 
+                `"${(item.type || 'Word').replace(/"/g, '""')}"`, // Include type
+                `"${(item.category || 'General').replace(/"/g, '""')}"`, // Include category
+                `"${item.context.replace(/"/g, '""')}"`, 
                 item.nextReviewDate,
                 item.level
-            ].join(';')); // Use semicolon as separator for better compatibility with non-US systems
-
-            // Combine headers and rows
+            ].join(';')); 
             const csvContent = [headers.join(';'), ...csvRows].join('\n');
-
-            // Create a Blob and download link
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
-            
-            // Set the download attributes
             link.href = URL.createObjectURL(blob);
             link.download = `srs_vocabulary_export_${new Date().toISOString().split('T')[0]}.csv`;
-
-            // Append link to body, click it, and remove it
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
             showNotification(`Exported ${currentVocabulary.length} words to CSV.`, 'info');
         }
 
@@ -263,7 +324,6 @@
                     vocabulary.push({ id: doc.id, ...doc.data() });
                 });
 
-                // Store current data globally before rendering
                 currentVocabulary = vocabulary;
 
                 // Sort vocabulary: prioritize items that need review (past or today) first, then by level (lower level first)
@@ -278,6 +338,7 @@
                     return a.level - b.level; // Lower level comes first
                 });
 
+                // Always re-render with the current filters applied
                 renderVocabulary(currentVocabulary);
             }, (error) => {
                 console.error("Error listening to vocabulary:", error);
@@ -285,75 +346,318 @@
             });
         }
         
+        function setCategoryFilter(filter) {
+            currentCategoryFilter = filter;
+            renderVocabulary(currentVocabulary); // Rerender the table with the new filter
+        }
+        
+        function setLevelFilter(filter) {
+            currentLevelFilter = filter;
+            renderVocabulary(currentVocabulary); // Rerender the table with the new filter
+        }
+
         function toggleContext(wordId) {
             // If the same word is clicked, hide it. Otherwise, show it.
             currentContextId = (currentContextId === wordId) ? null : wordId;
             renderVocabulary(currentVocabulary); // Re-render to apply the change
+        }
+        
+        // Helper function to determine if a word matches the current Level filter
+        function matchesLevelFilter(level) {
+            switch (currentLevelFilter) {
+                case 'All':
+                    return true;
+                case 'Hard':
+                    return level === 1;
+                case 'Medium':
+                    return level >= 2 && level <= 4;
+                case 'Easy':
+                    return level >= 5;
+                default:
+                    return true;
+            }
         }
 
 
         function renderVocabulary(vocabulary) {
             const tableBody = document.getElementById('vocab-table-body');
             if (!tableBody) return;
+            
+            // --- FILTERING LOGIC ---
+            let filteredVocabulary = vocabulary;
+            
+            // 1. Apply Category Filter
+            if (currentCategoryFilter !== 'All') {
+                filteredVocabulary = filteredVocabulary.filter(item => (item.category || 'General') === currentCategoryFilter);
+            }
+            
+            // 2. Apply Level Filter (NEW)
+            if (currentLevelFilter !== 'All') {
+                filteredVocabulary = filteredVocabulary.filter(item => matchesLevelFilter(item.level));
+            }
+
+
+            // Highlight the active CATEGORY filter button
+            document.querySelectorAll('.filter-tab-category').forEach(btn => {
+                if (btn.dataset.filter === currentCategoryFilter) {
+                    btn.classList.remove('bg-gray-700', 'text-gray-300', 'hover:bg-gray-600');
+                    btn.classList.add('bg-cyan-500', 'text-white', 'shadow-lg');
+                } else {
+                    btn.classList.remove('bg-cyan-500', 'text-white', 'shadow-lg');
+                    btn.classList.add('bg-slate-700', 'text-slate-300', 'hover:bg-slate-600');
+                }
+            });
+            
+            // Highlight the active LEVEL filter button (NEW)
+            document.querySelectorAll('.filter-tab-level').forEach(btn => {
+                if (btn.dataset.filter === currentLevelFilter) {
+                    btn.classList.remove('bg-gray-700', 'text-gray-300', 'hover:bg-gray-600');
+                    btn.classList.add('bg-indigo-500', 'text-white', 'shadow-lg');
+                } else {
+                    btn.classList.remove('bg-cyan-500', 'text-white', 'shadow-lg');
+                    btn.classList.add('bg-slate-700', 'text-slate-300', 'hover:bg-slate-600');
+                }
+            });
+
 
             tableBody.innerHTML = ''; // Clear the current list
-            document.getElementById('total-entries').textContent = `Total: ${vocabulary.length} palavras.`;
+            const totalDue = filteredVocabulary.filter(item => new Date(item.nextReviewDate) <= new Date()).length;
+            
+            // Update the display count based on the combined filter
+            document.getElementById('total-entries').textContent = `Showing: ${filteredVocabulary.length} entries (${totalDue} due)`;
 
 
-            if (vocabulary.length === 0) {
+            if (filteredVocabulary.length === 0) {
+                // Determine the filter text for the empty message
+                let filterText = '';
+                if (currentCategoryFilter !== 'All' && currentLevelFilter !== 'All') {
+                    filterText = `in the '${currentCategoryFilter}' category and '${currentLevelFilter}' level`;
+                } else if (currentCategoryFilter !== 'All') {
+                    filterText = `in the '${currentCategoryFilter}' category`;
+                } else if (currentLevelFilter !== 'All') {
+                    filterText = `at the '${currentLevelFilter}' level`;
+                }
+                
                 tableBody.innerHTML = `
-                    <tr><td colspan="5" class="p-6 text-center text-gray-500 bg-gray-700 rounded-b-xl">No words added yet. Use the form above to begin.</td></tr>
+                    <tr><td colspan="7" class="p-6 text-center text-slate-500 bg-slate-800 rounded-b-xl">No words found ${filterText}.</td></tr>
                 `;
                 return;
             }
 
-            vocabulary.forEach(item => {
+            filteredVocabulary.forEach(item => {
                 const isDue = new Date(item.nextReviewDate) <= new Date();
-                const rowClass = isDue ? 'bg-red-900/50 hover:bg-red-900/70' : 'bg-gray-700 hover:bg-gray-600';
+                const rowClass = isDue ? 'bg-red-900/40 hover:bg-red-900/60 border-red-500/50' : 'bg-slate-800 hover:bg-slate-700 border-slate-700';
+
+                // Determine level badge style
+                let levelBadgeColor = 'bg-gray-500';
+                let levelTextColor = 'text-white';
+                let levelLabel = `Lvl ${item.level}`;
+
+                if (item.level === 1) { // Hard
+                    levelBadgeColor = 'bg-red-600';
+                    levelTextColor = 'text-white';
+                } else if (item.level >= 2 && item.level <= 4) { // Medium
+                    levelBadgeColor = 'bg-yellow-500';
+                    levelTextColor = 'text-gray-900';
+                } else if (item.level >= 5) { // Easy
+                    levelBadgeColor = 'bg-cyan-600';
+                    levelTextColor = 'text-white';
+                }
+
 
                 // 1. Create the main vocabulary row
                 const row = document.createElement('tr');
-                row.className = `border-b border-gray-600 ${rowClass} transition duration-150`;
+                row.className = `border-b ${rowClass} transition duration-150`;
                 row.innerHTML = `
                     <td class="p-3 text-white font-medium">${item.word}</td>
-                    <td class="p-3 ${isDue ? 'text-red-400 font-bold' : 'text-gray-300'}">${item.nextReviewDate}</td>
-                    <td class="p-3 text-center text-yellow-400">Nível ${item.level}</td>
+                    <td class="p-3 text-cyan-400 font-semibold text-xs">${item.type || 'Word'}</td> <!-- Type Column -->
+                    <td class="p-3 text-slate-400">${item.category || 'General'}</td> <!-- Category Column -->
+                    <td class="p-3 ${isDue ? 'text-red-400 font-bold' : 'text-slate-300'}">${item.nextReviewDate}</td>
+                    <td class="p-3 text-center">
+                        <span class="inline-block px-3 py-1 text-xs font-semibold rounded-full ${levelBadgeColor} ${levelTextColor}">
+                            ${levelLabel}
+                        </span>
+                    </td>
                     <td class="p-3 space-y-2">
                         <button onclick="window.challengeHandler('${item.id}', ${item.level})"
-                                class="w-full px-3 py-1 text-sm bg-emerald-500 text-white rounded-lg shadow-md hover:bg-emerald-600 transition duration-150">
-                            Desafiar Memória
+                                class="w-full px-3 py-1 text-sm bg-indigo-500 text-white rounded-lg shadow-md hover:bg-indigo-600 transition duration-150 flex items-center justify-center">
+                            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            Quick Advance
                         </button>
                         <button onclick="window.toggleContextHandler('${item.id}')"
-                                class="w-full px-3 py-1 text-sm bg-gray-500 text-white rounded-lg shadow-md hover:bg-gray-600 transition duration-150">
-                            ${currentContextId === item.id ? 'Esconder Contexto' : 'Mostrar Contexto'}
+                                class="w-full px-3 py-1 text-sm bg-slate-600 text-white rounded-lg shadow-md hover:bg-slate-500 transition duration-150 flex items-center justify-center">
+                            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                            ${currentContextId === item.id ? 'Hide Context' : 'Show Context'}
                         </button>
                     </td>
                     <td class="p-3 text-center">
                         <button onclick="window.deleteHandler('${item.id}')"
-                                class="text-red-400 hover:text-red-500 p-1 rounded-full hover:bg-gray-600 transition duration-150">
+                                class="text-red-500 hover:text-red-400 p-2 rounded-full bg-slate-700 hover:bg-slate-600 transition duration-150">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                     </td>
                 `;
                 tableBody.appendChild(row);
                 
-                // 2. Conditionally add the context detail row
+                // 2. Conditionally add the context detail row (colspan must be 7 now)
                 if (item.id === currentContextId) {
                     const contextRow = document.createElement('tr');
-                    contextRow.className = 'bg-gray-900 border-b border-gray-600';
+                    contextRow.className = 'bg-slate-900/70 border-b border-slate-700';
                     contextRow.innerHTML = `
-                        <td colspan="5" class="p-4">
-                            <p class="text-xs font-bold text-gray-400 mb-1 uppercase">Contexto / Frase de Exemplo:</p>
-                            <p class="text-base text-gray-300 italic p-2 border-l-4 border-emerald-400 pl-3">${item.context}</p>
+                        <td colspan="7" class="p-4">
+                            <div class="flashcard-back">
+                                <p class="text-xs font-bold text-slate-300 mb-1 uppercase">Context / Example Sentence:</p>
+                                <p class="text-base text-white italic p-2 border-l-4 border-cyan-400 pl-3">${item.context}</p>
+                            </div>
                         </td>
                     `;
                     tableBody.appendChild(contextRow);
                 }
             });
         }
+        
+        // --- GAME MODE LOGIC ---
+        
+        function startGame() {
+            // The challenge queue should honor BOTH category and level filters.
+            const today = new Date().toISOString().split('T')[0];
+            
+            let filteredWords = currentVocabulary;
+            
+            // 1. Apply Category Filter
+            if (currentCategoryFilter !== 'All') {
+                filteredWords = filteredWords.filter(item => (item.category || 'General') === currentCategoryFilter);
+            }
+            
+            // 2. Apply Level Filter
+            if (currentLevelFilter !== 'All') {
+                filteredWords = filteredWords.filter(item => matchesLevelFilter(item.level));
+            }
 
+            // 3. Filter for due words only from the currently filtered list
+            const dueWords = filteredWords.filter(item => item.nextReviewDate <= today);
 
-        // --- MODAL AND NOTIFICATION HANDLING ---
+            if (dueWords.length === 0) {
+                let filterText = '';
+                if (currentCategoryFilter !== 'All' && currentLevelFilter !== 'All') {
+                    filterText = `in the '${currentCategoryFilter}' category and '${currentLevelFilter}' level`;
+                } else if (currentCategoryFilter !== 'All') {
+                    filterText = `in the '${currentCategoryFilter}' category`;
+                } else if (currentLevelFilter !== 'All') {
+                    filterText = `at the '${currentLevelFilter}' level`;
+                }
+
+                showNotification(`No words due for review ${filterText} today!`, 'info');
+                return;
+            }
+
+            // 4. Set the challenge queue (shuffled)
+            challengeQueue = dueWords.sort(() => Math.random() - 0.5); 
+            currentCardIndex = 0;
+            isCardFlipped = false;
+            
+            // 5. Change view
+            document.getElementById('table-view-container').classList.add('hidden');
+            document.getElementById('challenge-game-container').classList.remove('hidden');
+            document.getElementById('end-game-message').classList.add('hidden');
+            document.getElementById('top-game-button').classList.add('hidden');
+            
+            showNextCard();
+        }
+
+        function showNextCard() {
+            if (currentCardIndex >= challengeQueue.length) {
+                // End of game
+                document.getElementById('challenge-word').textContent = "Session Complete!";
+                document.getElementById('challenge-context').textContent = "All due words have been reviewed. Congratulations!";
+                document.getElementById('card-context-area').classList.remove('hidden'); 
+                document.getElementById('challenge-buttons-flip').classList.add('hidden');
+                document.getElementById('challenge-buttons-feedback').classList.add('hidden');
+                document.getElementById('challenge-progress').classList.add('hidden');
+                document.getElementById('end-game-message').classList.remove('hidden');
+                showNotification("Review session complete!", 'info');
+                return;
+            }
+
+            const card = challengeQueue[currentCardIndex];
+            
+            // Update progress: show Type in the progress bar
+            document.getElementById('challenge-progress').textContent = `Card ${currentCardIndex + 1} of ${challengeQueue.length} (${card.type || 'Word'} | ${card.category || 'General'} | Level ${card.level})`;
+            document.getElementById('challenge-word').textContent = card.word;
+            document.getElementById('challenge-context').textContent = card.context;
+            
+            // Reset card state
+            isCardFlipped = false;
+            document.getElementById('card-context-area').classList.add('hidden');
+            document.getElementById('challenge-buttons-flip').classList.remove('hidden');
+            document.getElementById('challenge-buttons-feedback').classList.add('hidden');
+            document.getElementById('challenge-progress').classList.remove('hidden');
+        }
+        
+        function flipCard() {
+            isCardFlipped = true;
+            document.getElementById('card-context-area').classList.remove('hidden');
+            document.getElementById('challenge-buttons-flip').classList.add('hidden');
+            document.getElementById('challenge-buttons-feedback').classList.remove('hidden');
+        }
+        
+        // Logic to process feedback (Easy/Good/Hard)
+        async function processAnswer(difficulty) {
+            const currentCard = challengeQueue[currentCardIndex];
+            if (!currentCard) return;
+
+            let newLevel = currentCard.level;
+            
+            // 1. Determine the new level based on feedback
+            if (difficulty === 'easy') {
+                // Easy: Advance 2 levels, or cap at MAX_LEVEL
+                newLevel = Math.min(currentCard.level + 2, MAX_LEVEL); 
+                showNotification(`'${currentCard.word}' marked as EASY! New Level ${newLevel}.`, 'info');
+            } else if (difficulty === 'good') {
+                 // Good: Advance 1 level, or cap at MAX_LEVEL
+                newLevel = Math.min(currentCard.level + 1, MAX_LEVEL); 
+                showNotification(`'${currentCard.word}' marked as GOOD. New Level ${newLevel}.`, 'info');
+            } else { // Hard
+                // Hard: Reset to Level 1
+                newLevel = 1; 
+                showNotification(`'${currentCard.word}' marked as HARD! Restarting Level 1.`, 'error');
+            }
+            
+            // 2. Calculate next review date
+            const nextReview = getNextReviewDate(newLevel);
+            
+            try {
+                const itemRef = doc(db, getVocabularyCollectionRef().path, currentCard.id);
+                await setDoc(itemRef, {
+                    level: newLevel,
+                    nextReviewDate: nextReview.toISOString().split('T')[0],
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+                
+                // 3. Move to the next card
+                currentCardIndex++;
+                showNextCard();
+
+            } catch (error) {
+                console.error("Error updating document in challenge mode: ", error);
+                showNotification("Failed to update memory challenge.", 'error');
+            }
+        }
+        
+        function exitGame() {
+            challengeQueue = [];
+            currentCardIndex = -1;
+            isCardFlipped = false;
+            
+            document.getElementById('table-view-container').classList.remove('hidden');
+            document.getElementById('challenge-game-container').classList.add('hidden');
+            document.getElementById('end-game-message').classList.add('hidden');
+            document.getElementById('top-game-button').classList.remove('hidden'); // Show button again
+            // Force re-render of the table to reflect updates
+            listenToVocabulary(); 
+        }
+
+        // --- MODAL AND NOTIFICATION HANDLING (REMAINS THE SAME) ---
 
         function showNotification(message, type = 'info') {
             const notification = document.getElementById('notification-message');
@@ -361,7 +665,7 @@
             if (!notification || !container) return;
 
             notification.textContent = message;
-            container.className = `fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform transform ${type === 'error' ? 'bg-red-500' : 'bg-green-500'}`;
+            container.className = `fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-transform transform ${type === 'error' ? 'bg-red-500' : 'bg-cyan-500'}`;
             container.classList.remove('translate-x-full');
             container.classList.add('translate-x-0');
 
@@ -375,12 +679,25 @@
         window.addHandler = () => {
             const wordInput = document.getElementById('word-input');
             const contextInput = document.getElementById('context-input');
-            addVocabularyItem(wordInput.value, contextInput.value);
+            const categoryInput = document.getElementById('category-input');
+            const typeInput = document.getElementById('type-input');
+            addVocabularyItem(wordInput.value, contextInput.value, categoryInput.value, typeInput.value);
         };
-        window.challengeHandler = challengeMemory;
+        window.saveNameHandler = () => {
+            const nameInput = document.getElementById('name-input');
+            saveUserName(nameInput.value);
+        }
+        window.challengeHandler = challengeMemory; 
         window.deleteHandler = deleteVocabularyItem;
         window.toggleContextHandler = toggleContext;
         window.exportHandler = exportToCSV;
+        // Game mode functions
+        window.startGameHandler = startGame;
+        window.flipCardHandler = flipCard;
+        window.processAnswerHandler = processAnswer;
+        window.exitGameHandler = exitGame;
+        window.setCategoryFilterHandler = setCategoryFilter; 
+        window.setLevelFilterHandler = setLevelFilter; 
 
 
         // Start the application setup
@@ -397,19 +714,43 @@
 
     <div class="max-w-4xl mx-auto">
         <header class="text-center mb-8">
-            <h1 class="text-4xl font-extrabold text-emerald-400 mb-2">
-                Plano Mestre de Retenção (SRS)
+            <h1 class="text-4xl font-extrabold text-cyan-400 mb-2">
+                SRS Vocabulary Master Plan
             </h1>
-            <p id="user-id-display" class="text-sm text-gray-400 truncate break-all">
-                Loading User ID...
+            <p id="welcome-message" class="text-xl text-slate-200 font-semibold mb-6">
+                Welcome, User!
             </p>
+            
+            <!-- START REVIEW SESSION BUTTON (New, prominent location) -->
+            <button id="top-game-button" onclick="window.startGameHandler()"
+                    class="w-full max-w-sm mx-auto px-8 py-4 bg-cyan-500 text-white font-extrabold text-lg rounded-xl shadow-2xl shadow-cyan-500/50 hover:bg-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-500 focus:ring-opacity-50 transition duration-300 ease-in-out transform hover:scale-[1.05] flex items-center justify-center mb-8">
+                <svg class="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                START REVIEW SESSION
+            </button>
+
             <p class="text-sm text-red-400 mt-2">
-                This version uses your **Personal Firestore** storage for persistent saving.
+                This app uses your **Personal Firestore** storage to save data.
             </p>
         </header>
 
+        <!-- Student Name Input and Save Button -->
+        <div class="p-4 bg-slate-800 rounded-xl shadow-2xl shadow-slate-900/50 mb-8 border border-slate-700">
+            <div class="flex flex-col sm:flex-row gap-3 items-center">
+                <div class="flex-grow w-full sm:w-auto">
+                    <label for="name-input" class="block text-xs font-medium text-slate-400 mb-1">Your Name (Saved in Profile)</label>
+                    <input type="text" id="name-input" placeholder="Enter your name here" 
+                           class="w-full p-3 rounded-lg border-2 border-slate-600 bg-slate-700 text-white placeholder-slate-400 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition duration-150 ease-in-out shadow-inner">
+                </div>
+                <button onclick="window.saveNameHandler()"
+                        class="w-full sm:w-auto mt-4 sm:mt-0 px-6 py-3 bg-indigo-500 text-white font-semibold rounded-xl shadow-lg hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-800 transition duration-150 ease-in-out transform hover:scale-[1.02]">
+                    <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                    Save Name
+                </button>
+            </div>
+        </div>
+
         <!-- Loading State -->
-        <div id="loading-state" class="flex flex-col items-center justify-center p-10 bg-gray-800 rounded-xl shadow-2xl text-white">
+        <div id="loading-state" class="flex flex-col items-center justify-center p-10 bg-slate-800 rounded-xl shadow-2xl text-white">
             <div class="loading-ring mb-4"></div>
             <p>Initializing application and signing in...</p>
         </div>
@@ -417,54 +758,204 @@
         <!-- Main Content (Hidden until Firebase is ready) -->
         <main id="main-content" class="hidden">
             
-            <!-- 1. Adicionar Vocabulário com Contexto -->
-            <h2 class="text-2xl font-semibold text-white mb-4">1. Adicionar Vocabulário com Contexto</h2>
-            <div class="p-6 bg-gray-800 rounded-2xl shadow-xl mb-8">
-                <div class="mb-4">
-                    <label for="word-input" class="block text-sm font-medium text-gray-300 mb-1">Palavra/Frase</label>
-                    <input type="text" id="word-input" placeholder="Ex: 'Ephemeral' ou 'To call it a day'" 
-                           class="w-full p-3 rounded-lg border-2 border-gray-600 bg-gray-700 text-white placeholder-gray-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 transition duration-150 ease-in-out">
-                </div>
+            <!-- 1. Add Vocabulary with Context -->
+            <h2 class="text-2xl font-semibold text-white mb-4 border-b border-slate-700 pb-2">1. Add New Entry</h2>
+            <div class="p-6 bg-slate-800 rounded-2xl shadow-2xl shadow-slate-900/50 mb-8 border border-slate-700">
                 
-                <div class="mb-6">
-                    <label for="context-input" class="block text-sm font-medium text-gray-300 mb-1">Contexto / Frase de Exemplo</label>
-                    <input type="text" id="context-input" placeholder="Ex: 'The beauty of the cherry blossoms is ephemeral.'" 
-                           class="w-full p-3 rounded-lg border-2 border-gray-600 bg-gray-700 text-white placeholder-gray-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 transition duration-150 ease-in-out">
+                <!-- Input Grid -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <!-- Word Input -->
+                    <div>
+                        <label for="word-input" class="block text-sm font-medium text-slate-300 mb-1">Word/Phrase (Required)</label>
+                        <input type="text" id="word-input" placeholder="Ex: 'Ephemeral'" 
+                               class="w-full p-3 rounded-lg border-2 border-slate-600 bg-slate-700 text-white placeholder-slate-400 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition duration-150 ease-in-out shadow-inner">
+                    </div>
+
+                    <!-- Context/Sentence Input -->
+                    <div>
+                        <label for="context-input" class="block text-sm font-medium text-slate-300 mb-1">Context / Definition (Required)</label>
+                        <input type="text" id="context-input" placeholder="Ex: 'Lasting for a very short time.'" 
+                               class="w-full p-3 rounded-lg border-2 border-slate-600 bg-slate-700 text-white placeholder-slate-400 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition duration-150 ease-in-out shadow-inner">
+                    </div>
+                </div>
+
+                <!-- Type and Category Dropdowns -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                     <!-- Entry Type Dropdown -->
+                    <div>
+                        <label for="type-input" class="block text-sm font-medium text-slate-300 mb-1">Entry Type</label>
+                        <select id="type-input" 
+                                class="w-full p-3 rounded-lg border-2 border-slate-600 bg-slate-700 text-white focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition duration-150 ease-in-out shadow-inner">
+                            <option>Word</option>
+                            <option>Expression</option>
+                            <option>Sentence</option>
+                            <option>Phrase</option>
+                            <option>Phrasal Verb</option>
+                            <option>Pronunciation</option>
+                            <option>Grammar Structure</option>
+                        </select>
+                    </div>
+
+                    <!-- Category Dropdown -->
+                    <div>
+                        <label for="category-input" class="block text-sm font-medium text-slate-300 mb-1">Category (Required for Filtering)</label>
+                        <select id="category-input" 
+                                class="w-full p-3 rounded-lg border-2 border-slate-600 bg-slate-700 text-white focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition duration-150 ease-in-out shadow-inner">
+                            <option value="General">General</option>
+                            <option value="Business">Business</option>
+                        </select>
+                    </div>
                 </div>
 
                 <button onclick="window.addHandler()"
-                        class="w-full px-6 py-3 bg-emerald-500 text-white font-semibold rounded-lg shadow-md hover:bg-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 focus:ring-offset-gray-800 transition duration-150 ease-in-out">
-                    Adicionar Palavra (Início da Repetição Espaçada)
+                        class="w-full px-6 py-3 bg-cyan-500 text-white font-semibold rounded-xl shadow-lg shadow-cyan-500/30 hover:bg-cyan-600 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-offset-2 focus:ring-offset-slate-800 transition duration-150 ease-in-out transform hover:scale-[1.01]">
+                    <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    Add Entry (Start Spaced Repetition)
                 </button>
             </div>
 
 
-            <!-- 2. Monitoramento de Retenção (Spaced Repetition) -->
-            <h2 class="text-2xl font-semibold text-white mb-4">2. Monitoramento de Retenção</h2>
-            <div class="p-6 bg-gray-800 rounded-2xl shadow-xl">
-                <div class="flex flex-col sm:flex-row justify-between items-center mb-4">
-                    <p id="total-entries" class="text-sm text-gray-400 mb-2 sm:mb-0">Seu vocabulário, classificado por urgência de revisão.</p>
-                    <button onclick="window.exportHandler()"
-                            class="px-4 py-2 bg-gray-600 text-white rounded-lg shadow-md hover:bg-gray-500 transition duration-150">
-                        Exportar para CSV
-                    </button>
-                </div>
+            <!-- 2. Challenge Mode (Flashcard Game) -->
+            <div id="challenge-game-container" class="hidden">
+                <h2 class="text-2xl font-semibold text-white mb-4 text-center border-b border-slate-700 pb-2">Review Challenge Mode</h2>
+                <div class="p-8 bg-slate-800 rounded-2xl shadow-2xl max-w-lg mx-auto mb-6 border border-slate-700">
+                    
+                    <p id="challenge-progress" class="text-sm text-slate-400 text-center mb-4"></p>
 
-                <div class="overflow-x-auto rounded-lg shadow-lg">
-                    <table class="min-w-full">
-                        <thead>
-                            <tr>
-                                <th class="table-header w-2/5">Palavra</th>
-                                <th class="table-header w-1/5">Próxima Revisão</th>
-                                <th class="table-header w-1/12 text-center">Nível</th>
-                                <th class="table-header w-1/4">Desafio (Recall)</th>
-                                <th class="table-header w-1/12 text-center">Ações</th>
-                            </tr>
-                        </thead>
-                        <tbody id="vocab-table-body" class="divide-y divide-gray-600 text-gray-200">
-                            <tr><td colspan="5" class="p-6 text-center text-gray-500 bg-gray-700">Loading vocabulary...</td></tr>
-                        </tbody>
-                    </table>
+                    <!-- Flashcard Area -->
+                    <div class="flashcard bg-slate-900 rounded-xl p-8 shadow-2xl shadow-cyan-500/20 border-2 border-cyan-500/50 hover:border-cyan-500">
+                        <svg class="w-8 h-8 text-cyan-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5 5.754 5 4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18s-3.332.477-4.5 1.253"></path></svg>
+                        <h3 id="challenge-word" class="text-4xl font-extrabold text-white text-center mb-4 transition duration-300"></h3>
+                        
+                        <!-- Context/Answer Area (Hidden by default) -->
+                        <div id="card-context-area" class="hidden w-full mt-6 p-4 bg-slate-700 rounded-lg border-l-4 border-cyan-400 shadow-md">
+                            <p class="text-xs font-bold text-cyan-400 mb-2 uppercase tracking-wider">Context / Answer:</p>
+                            <p id="challenge-context" class="text-base text-slate-200 italic"></p>
+                        </div>
+
+                        <!-- End Game Message -->
+                        <div id="end-game-message" class="hidden text-center mt-6">
+                            <p class="text-2xl font-semibold text-cyan-400">Review Session Complete!</p>
+                            <p class="text-slate-400 mt-2">Time to check your progress table.</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Control Buttons -->
+                    <div class="mt-6 space-y-3">
+                        <!-- 1. Flip Button -->
+                        <div id="challenge-buttons-flip" class="flex justify-center">
+                            <button onclick="window.flipCardHandler()"
+                                    class="w-full px-6 py-3 bg-indigo-500 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/30 hover:bg-indigo-600 transition duration-150 transform hover:scale-[1.01]">
+                                <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                Reveal Context
+                            </button>
+                        </div>
+                        
+                        <!-- 2. Feedback Buttons (Shown after flip) -->
+                        <div id="challenge-buttons-feedback" class="grid grid-cols-3 gap-3 hidden">
+                            <button onclick="window.processAnswerHandler('hard')"
+                                    class="px-2 py-3 bg-red-600 text-white font-semibold text-sm rounded-xl shadow-lg hover:bg-red-700 transition duration-150 transform hover:scale-[1.02]">
+                                Hard (1 Day)
+                            </button>
+                            <button onclick="window.processAnswerHandler('good')"
+                                    class="px-2 py-3 bg-yellow-600 text-white font-semibold text-sm rounded-xl shadow-lg hover:bg-yellow-700 transition duration-150 transform hover:scale-[1.02]">
+                                Good (3 Days)
+                            </button>
+                            <button onclick="window.processAnswerHandler('easy')"
+                                    class="px-2 py-3 bg-cyan-600 text-white font-semibold text-sm rounded-xl shadow-lg hover:bg-cyan-700 transition duration-150 transform hover:scale-[1.02]">
+                                Easy (7 Days)
+                            </button>
+                        </div>
+                        
+                        <!-- Exit Button -->
+                        <button onclick="window.exitGameHandler()"
+                                class="w-full px-6 py-3 bg-slate-600 text-white font-semibold rounded-xl shadow-md hover:bg-slate-500 transition duration-150 mt-4">
+                            Exit Challenge
+                        </button>
+                    </div>
+
+                </div>
+            </div>
+
+
+            <!-- 3. Retention Tracking (Table View) -->
+            <div id="table-view-container">
+                <h2 class="text-2xl font-semibold text-white mb-4 border-b border-slate-700 pb-2">3. Retention Tracking (Table View)</h2>
+                <div class="p-6 bg-slate-800 rounded-2xl shadow-2xl shadow-slate-900/50 border border-slate-700">
+                    
+                    <!-- Filter Section -->
+                    <div class="mb-6">
+                        <!-- Category Filter Tabs (Pill Style) -->
+                        <p class="text-sm font-medium text-slate-400 mb-2">Filter by Category:</p>
+                        <div class="flex space-x-2 p-1 bg-slate-700 rounded-full mb-4">
+                            <button data-filter="All" onclick="window.setCategoryFilterHandler('All')" 
+                                    class="filter-tab-category flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                All Entries
+                            </button>
+                            <button data-filter="General" onclick="window.setCategoryFilterHandler('General')"
+                                    class="filter-tab-category flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                General
+                            </button>
+                            <button data-filter="Business" onclick="window.setCategoryFilterHandler('Business')"
+                                    class="filter-tab-category flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                Business
+                            </button>
+                        </div>
+
+                        <!-- Level/Difficulty Filter Tabs (Pill Style) -->
+                        <p class="text-sm font-medium text-slate-400 mb-2">Filter by Mastery Level (SRS Level):</p>
+                        <div class="grid grid-cols-4 gap-2 p-1 bg-slate-700 rounded-full">
+                            <button data-filter="All" onclick="window.setLevelFilterHandler('All')" 
+                                    class="filter-tab-level flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                All Levels
+                            </button>
+                            <button data-filter="Hard" onclick="window.setLevelFilterHandler('Hard')"
+                                    class="filter-tab-level flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                Hard (Lvl 1)
+                            </button>
+                            <button data-filter="Medium" onclick="window.setLevelFilterHandler('Medium')"
+                                    class="filter-tab-level flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                Medium (Lvl 2-4)
+                            </button>
+                            <button data-filter="Easy" onclick="window.setLevelFilterHandler('Easy')"
+                                    class="filter-tab-level flex-grow px-4 py-2 text-sm font-semibold rounded-full transition duration-150">
+                                Easy (Lvl 5+)
+                            </button>
+                        </div>
+                    </div>
+                    <!-- End Filter Section -->
+
+
+                    <div class="flex flex-col sm:flex-row justify-between items-center mb-4 space-y-3 sm:space-y-0">
+                        <p id="total-entries" class="text-sm text-slate-400">Your vocabulary, ranked by review urgency.</p>
+                        <div class="flex space-x-3">
+                            <!-- The Start Review button was moved to the prominent position in the header -->
+                            <button onclick="window.exportHandler()"
+                                    class="px-4 py-2 bg-slate-600 text-white rounded-xl shadow-md hover:bg-slate-500 transition duration-150 transform hover:scale-[1.01]">
+                                <svg class="w-5 h-5 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                Export
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto rounded-lg shadow-xl shadow-slate-900/50">
+                        <table class="min-w-full">
+                            <thead id="vocab-table-head">
+                                <tr>
+                                    <th class="table-header w-1/5">Word</th>
+                                    <th class="table-header w-1/12">Type</th> 
+                                    <th class="table-header w-1/6">Category</th> 
+                                    <th class="table-header w-1/6">Next Review</th>
+                                    <th class="table-header w-1/12 text-center">Level</th>
+                                    <th class="table-header w-1/4">Challenge Actions</th>
+                                    <th class="table-header w-1/12 text-center">Delete</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vocab-table-body" class="divide-y divide-slate-700 text-slate-200">
+                                <tr><td colspan="7" class="p-6 text-center text-slate-500 bg-slate-800">Loading vocabulary...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
             
